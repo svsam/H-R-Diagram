@@ -1,73 +1,128 @@
-from astroquery.gaia import Gaia
+#python3 gaia_downloader.py --limit 1000 --output gaia_stellar_data.csv
+
+import os
+import csv
+import time
+import certifi
 from pathlib import Path
-import argparse
-import re
+from astroquery.gaia import Gaia
 
-def build_query(limit: int) -> str:
+
+os.environ["SSL_CERT_FILE"] = certifi.where()
+os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+
+
+def build_query(chunk_size, last_source_id):
     query = f"""
-
-    SELECT TOP {limit}
+    SELECT TOP {chunk_size}
         source_id,
-
         teff_gspphot AS surface_temperature_K,
-        teff_gspphot_lower AS surface_temperature_K_lower,
-        teff_gspphot_upper AS surface_temperature_K_upper,
-
-        lum_flame AS luminosity_Lsun,
-        lum_flame_lower AS luminosity_Lsun_lower,
-        lum_flame_upper AS luminosity_Lsun_upper,
-
+        lum_flame AS luminosity_L_sun
     FROM gaiadr3.astrophysical_parameters
-
     WHERE
-        teff_gspphot IS NOT NULL 
+        source_id > {last_source_id}
+        AND teff_gspphot IS NOT NULL
         AND lum_flame IS NOT NULL
-        AND teff_gspphot >0
+        AND teff_gspphot > 0
         AND lum_flame > 0
         AND classprob_dsc_combmod_star >= 0.5
+    ORDER BY source_id ASC
     """
+
     return query
 
-def download_data(output_file: str, limit: int):
-    query = build_query(limit)
-    
-    print(f"Output file: {output_file}")
 
+def append_rows_to_csv(results, output_file, write_header):
+    fieldnames = [
+        "source_id",
+        "surface_temperature_K",
+        "luminosity_L_sun",
+    ]
+
+    with open(output_file, "a", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+
+        if write_header:
+            writer.writeheader()
+
+        for row in results:
+            writer.writerow(
+                {
+                    "source_id": int(row["source_id"]),
+                    "surface_temperature_K": float(row["surface_temperature_K"]),
+                    "luminosity_L_sun": float(row["luminosity_L_sun"]),
+                }
+            )
+
+
+def download_gaia_hr_data(
+    output_file="gaia_hr_data_1million.csv",
+    total_rows=1_000_000,
+    chunk_size=50_000,
+    pause_seconds=2,
+):
     Gaia.ROW_LIMIT = -1
 
-    job = Gaia.launch_job_async(
-        query=query,
-        output_file=output_file,
-        output_format='csv',
-        dump_to_file=True,
-    )
+    output_path = Path(output_file)
 
-    print(f"Download completed. Data saved to {Path(output_file).resolve()}")
+    if output_path.exists():
+        output_path.unlink()
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Download stellar data from Gaia DR3 with specific parameters."
-    )
+    rows_downloaded = 0
+    last_source_id = 0
+    write_header = True
 
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=1_000_000_000,
-        help="Maximum number of rows to download."
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="gaia_stellar_data.csv",
-        help="Output CSV filename.",
-    )
+    while rows_downloaded < total_rows:
+        remaining = total_rows - rows_downloaded
+        current_chunk_size = min(chunk_size, remaining)
 
-    args = parser.parse_args()
+        print(
+            f"Downloading chunk: {rows_downloaded:,} / {total_rows:,} rows complete"
+        )
 
-    download_data(
-        output_file=args.output,
-        limit=args.limit,
-    )
+        query = build_query(
+            chunk_size=current_chunk_size,
+            last_source_id=last_source_id,
+        )
+
+        try:
+            job = Gaia.launch_job_async(
+                query=query,
+                dump_to_file=False,
+            )
+
+            results = job.get_results()
+
+        except Exception as error:
+            print("\nA Gaia Archive query failed.")
+            print("Try lowering chunk_size, for example to 10000 or 5000.")
+            print(f"\nError was:\n{error}")
+            raise
+
+        if len(results) == 0:
+            print("No more matching Gaia rows found.")
+            break
+
+        append_rows_to_csv(
+            results=results,
+            output_file=output_file,
+            write_header=write_header,
+        )
+
+        write_header = False
+        rows_downloaded += len(results)
+        last_source_id = int(results[-1]["source_id"])
+        print()
+
+        time.sleep(pause_seconds)
+
+    print("Finished!")
+    print(f"Saved file: {output_path.resolve()}")
 
 if __name__ == "__main__":
-    main()
+    download_gaia_hr_data(
+        output_file="gaia_hr_data_1million.csv",
+        total_rows=1_000_000,
+        chunk_size=50_000,
+        pause_seconds=2,
+    )
